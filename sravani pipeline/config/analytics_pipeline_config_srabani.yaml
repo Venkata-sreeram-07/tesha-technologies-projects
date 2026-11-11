@@ -1,0 +1,106 @@
+# =====================================================================
+# Signal pipeline - single source of truth for the Composer DAG.
+#
+# The DAG reads ONLY this file. To change a path, an argument, the
+# schedule, the batch sizing, or who gets the notification emails,
+# edit here and re-upload - never the DAG.
+# Lives next to the DAG at:  gs://<composer-bucket>/dags/config/analytics_pipeline_config_srabani.yaml
+# =====================================================================
+
+gcp:
+  project_id: "project-23dfabac-4beb-4269-a9d"
+  region: "us-central1"
+
+  # Service account that RUNS the Spark batch. It needs BigQuery Data Editor +
+  # Job User, Storage Object Viewer on the code bucket, Drive read on the folder,
+  # and Service Account Token Creator on itself. Leave "" to use the Compute
+  # Engine default SA (not recommended for prod).
+  service_account: ""
+
+  # Serverless batches need a subnet with Private Google Access ON. Give the
+  # subnet (preferred) OR a network; leave both "" to use the region's "default"
+  # subnet (only works if its Private Google Access is enabled).
+  subnetwork_uri: ""   # e.g. "projects/<proj>/regions/us-central1/subnetworks/default"
+  network_uri: ""      # e.g. "projects/<proj>/global/networks/default"
+
+code:
+  # GCS location of the PySpark job and the transformation SQL you uploaded.
+  main_python_file_uri: "gs://tt_project_1/poc_3/gdrive_poc3_srabani.py"
+  transform_sql_uri: "gs://tt_project_1/poc_3/transformations.sql"
+  python_file_uris: []   # extra .py modules, if you ever split the code
+  archive_uris: []       # .zip/.tar.gz archives, if needed
+
+dataproc:
+  runtime_version: "2.2"             # Dataproc Serverless runtime (Spark 3.5)
+  batch_id_prefix: "signal-pipeline-srabani" # final id: <prefix>-<YYYYMMDD>-<try>
+  ttl_seconds: 7200                  # auto-expire the batch resource after 2h
+  deferrable: true                   # free the Airflow worker while the batch runs
+                                     # (needs the Composer triggerer - on by default)
+  # Optional Spark overrides. The job sets its own SQL props in code, so this can
+  # stay empty and let Serverless autoscale. Values must be strings.
+  runtime_properties: {}
+  # Example:
+  # runtime_properties:
+  #   spark.executor.cores: "4"
+  #   spark.executor.instances: "2"
+
+job:
+  # These become --flags passed to the PySpark job.
+  bq_dataset: "analytics_pipeline_srabani"
+  bq_location: "us-central1"
+  drive_folder_id: "1O0nol9D0SXSDuBkNp3JBC6hyOxSqrEHx"
+  full_refresh: false     # true = reprocess every file (ignores the checkpoint)
+  extra_args: []          # any additional flags, e.g. ["--dry-run=true"]
+
+  # Names of the five BigQuery tables the job writes. Only override if you
+  # also change them inside gdrive_poc3_srabani.py (they must match).
+  tables:
+    audit: "audit_table"
+    metadata: "metadata_table"
+    dup_detail: "signal_metric_duplicate_detail"
+    dup_summary: "signal_metric_duplicate_summary"
+    final: "BQ_Final_Processed_data"
+
+airflow:
+  schedule: "0 6 * * *"   # daily 06:00 UTC; set null to run on-demand only
+  start_date: "2026-01-01"
+  catchup: false
+  max_active_runs: 1      # never let two daily runs touch the tables at once
+  retries: 2
+  retry_delay_minutes: 5
+  execution_timeout_minutes: 90
+  owner: "data-eng"
+  tags: ["signal", "dataproc-serverless", "bigquery"]
+
+# =====================================================================
+# Email notifications
+# ---------------------------------------------------------------------
+# Two emails per run:
+#   1) PRE-START : after the Drive folder is scanned, before the batch is
+#                  submitted. Shows total files found, which are new, which
+#                  changed, which will be skipped, which are being retried.
+#   2) COMPLETION: after the batch finishes (success OR failure). Shows the
+#                  audit, data-quality metadata, duplicate summary + top
+#                  offending metrics, and the final-table row counts.
+#
+# The app password below is a Gmail App Password (16 chars, no spaces),
+# NOT the mailbox password. For production, move smtp_password into
+# Secret Manager / an Airflow Connection and reference it from there.
+# =====================================================================
+email:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587                     # STARTTLS
+  smtp_user: "customer_reports@suki.ai"
+  smtp_password: "nqqtglhssordkfen"  # Gmail App Password
+  from_address: "customer_reports@suki.ai"
+  from_name: "Suki Signal Pipeline"
+  to_addresses:
+    - "ssreeram@suki.ai"
+  cc_addresses: []
+  subject_prefix: "[Signal Pipeline]"
+  environment: "production"          # shown in email footer
+  # If the prestart email fails, the pipeline still proceeds to the batch.
+  # If the completion email fails, the pipeline task is marked failed but
+  # the data in BigQuery is unaffected.
+  fail_pipeline_on_email_error: false
