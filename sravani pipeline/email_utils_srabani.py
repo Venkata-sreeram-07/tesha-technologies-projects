@@ -70,14 +70,20 @@ def _esc(s):
 
 
 def _esc_with_breaks(s):
-    """HTML-escape AND insert soft word-break opportunities (<wbr>) after
-    underscores, hyphens, dots and forward slashes. Used for long tokens like
-    filenames and MIME types so they wrap at natural seams instead of
-    overflowing their table cell. Numbers (no separators) stay intact.
+    """HTML-escape AND insert soft word-break opportunities (zero-width space,
+    U+200B) after underscores, hyphens, dots and forward slashes. Used for
+    long tokens like filenames and MIME types so they wrap at natural seams
+    instead of overflowing their table cell. Numbers (no separators) stay
+    intact.
+
+    Note: we use the zero-width-space CHARACTER (&#8203;) rather than the
+    <wbr> HTML tag because Gmail and several other email clients strip
+    <wbr>, which collapses our wrap hints and lets the cell overflow.
     """
     esc = _esc(s)
+    zwsp = "&#8203;"
     for sep in ("_", "-", ".", "/"):
-        esc = esc.replace(sep, sep + "<wbr>")
+        esc = esc.replace(sep, sep + zwsp)
     return esc
 
 
@@ -133,12 +139,17 @@ def _fmt_duration(start, end):
 
 
 def _badge(text, kind="neutral"):
-    """Colored pill badge. kind: success|warn|danger|info|neutral."""
+    """Colored pill badge. kind: success|warn|danger|info|neutral.
+
+    Uses white-space:nowrap so the pill text never breaks mid-letter when the
+    surrounding cell is narrow (otherwise 'WARN' can render as 'W A R N' in
+    Gmail because of the break-word rule on the parent cell).
+    """
     fg = COLORS.get(kind, COLORS["neutral"])
     bg = COLORS.get("%s_bg" % kind, COLORS["neutral_bg"])
     return (
-        '<span style="display:inline-block;padding:3px 10px;border-radius:999px;'
-        'font-size:12px;font-weight:600;letter-spacing:.3px;'
+        '<span style="display:inline-block;padding:3px 8px;border-radius:999px;'
+        'font-size:11px;font-weight:700;letter-spacing:.3px;white-space:nowrap;'
         'background:%s;color:%s;border:1px solid %s;">%s</span>'
         % (bg, fg, fg, _esc(text))
     )
@@ -216,37 +227,54 @@ def _section_header(title, icon=""):
 
 
 def _data_table(headers, rows, col_aligns=None, col_widths=None, caption=None):
-    """Render a nice striped data table.
+    """Render a striped data table that stays within its container in every
+    email client we care about (Gmail web+mobile, Apple Mail, Outlook web).
 
     rows: list of lists of pre-rendered HTML strings (already escaped).
     col_aligns: optional list of 'left'|'right'|'center' per column.
-    col_widths: optional list of integer percent values summing to ~100;
-                when given, the table uses table-layout:fixed so long cell
-                content wraps instead of expanding the table.
+    col_widths: optional list of integer percent values summing to ~100.
+                When given, each <th> and <td> is given an explicit width
+                via BOTH the HTML `width` attribute AND an inline style
+                `width + max-width`, because <colgroup> is unreliable in
+                email (Gmail strips or ignores it, letting a long filename
+                blow the table out and overlap other cells).
     """
     if col_aligns is None:
         col_aligns = ["left"] * len(headers)
 
     use_fixed = col_widths is not None
 
-    # Build <colgroup> for fixed layout.
-    colgroup = ""
-    if use_fixed:
-        colgroup = "<colgroup>" + "".join(
-            '<col style="width:' + str(w) + '%;">' for w in col_widths
-        ) + "</colgroup>"
-
     # Header: never break inside a word - headers are short labels.
-    # Data:   break only at natural boundaries (whitespace, hyphens, underscores
-    #         via the softer rule); numbers like "54,321" stay intact.
+    # Data:   allow break-word so long unbreakable tokens (file names, metric
+    #         column names) wrap INSIDE the cell instead of forcing the cell
+    #         wider than its declared width. The combination
+    #         `max-width + table-layout:fixed + break-word` is the Gmail-safe
+    #         recipe for cells that hold variable-length data.
     th_wrap = "white-space:normal;word-break:normal;" if use_fixed else ""
-    td_wrap = "overflow-wrap:break-word;word-break:normal;" if use_fixed else ""
+    td_wrap = "overflow-wrap:break-word;word-break:break-word;" if use_fixed else ""
+
+    def _width_attrs(i):
+        """HTML width attr + inline width + max-width. All three, on purpose:
+        - width attr is respected by Outlook and legacy clients.
+        - inline `width` is respected by Gmail web + Apple Mail.
+        - inline `max-width` is the only thing that keeps a cell from growing
+          past its share when the content is a long unbreakable token AND the
+          email client ignores table-layout:fixed.
+        """
+        if not use_fixed:
+            return "", ""
+        w = str(col_widths[i])
+        html_attr = ' width="' + w + '%"'
+        style = 'width:' + w + '%;max-width:' + w + '%;'
+        return html_attr, style
 
     th_cells = []
     for i, h in enumerate(headers):
+        w_attr, w_style = _width_attrs(i)
         th_cells.append(
-            '<th align="' + col_aligns[i] + '" '
-            'style="padding:9px 8px;font-size:12px;font-weight:700;color:'
+            '<th align="' + col_aligns[i] + '"' + w_attr + ' '
+            'style="' + w_style
+            + 'padding:9px 8px;font-size:12px;font-weight:700;color:'
             + COLORS["text"] + ';text-transform:uppercase;letter-spacing:.3px;'
             'border-bottom:2px solid ' + COLORS["primary"] + ';background:'
             + COLORS["neutral_bg"] + ';font-family:' + FONT_STACK + ';'
@@ -260,9 +288,11 @@ def _data_table(headers, rows, col_aligns=None, col_widths=None, caption=None):
         tds = []
         for i, cell in enumerate(row):
             align = col_aligns[i] if i < len(col_aligns) else "left"
+            w_attr, w_style = _width_attrs(i)
             tds.append(
-                '<td align="' + align + '" '
-                'style="padding:9px 8px;font-size:13px;color:' + COLORS["text"]
+                '<td align="' + align + '"' + w_attr + ' '
+                'style="' + w_style
+                + 'padding:9px 8px;font-size:13px;color:' + COLORS["text"]
                 + ';border-bottom:1px solid ' + COLORS["border"]
                 + ';font-family:' + FONT_STACK + ';vertical-align:top;'
                 + td_wrap + '">' + cell + '</td>'
@@ -282,9 +312,9 @@ def _data_table(headers, rows, col_aligns=None, col_widths=None, caption=None):
     layout = "table-layout:fixed;" if use_fixed else ""
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" '
-        'width="100%" style="border-collapse:collapse;border:1px solid '
+        'width="100%" style="width:100%;border-collapse:collapse;border:1px solid '
         + COLORS["border"] + ';border-radius:10px;overflow:hidden;' + layout + '">'
-        + colgroup + '<thead><tr>' + th_html + '</tr></thead><tbody>'
+        '<thead><tr>' + th_html + '</tr></thead><tbody>'
         + "".join(body_html_rows) + '</tbody></table>' + caption_html
     )
 
@@ -723,7 +753,7 @@ def render_completion_email(dag_id, dag_run_id, batch_id, env_label,
             headers=["File", "Sheet", "DQ", "Nulls", "Dup rows", "Bad chars", "Issues"],
             rows=rows,
             col_aligns=["left", "left", "left", "right", "right", "right", "left"],
-            col_widths=[26, 13, 9, 9, 10, 10, 23],
+            col_widths=[25, 12, 11, 9, 10, 10, 23],
             caption="Only sheets with DQ status = WARN are listed. "
                     "Source: `%s.%s.%s`" % (bq_project, bq_dataset, bq_tables["metadata"])))
     else:
@@ -772,23 +802,45 @@ def render_completion_email(dag_id, dag_run_id, batch_id, env_label,
             spread = r.get("max_value_spread")
             spread_str = "-" if spread is None else ("%.4f" % spread)
             main = _badge("MAIN", "info") if r.get("is_main_metric") else ""
+            # Metric cell = column name + MAIN badge, with raw label as a
+            # smaller subtitle. One cell instead of two saves 14% of table
+            # width for the numeric columns to breathe.
+            raw = (r.get("raw_metric_labels") or "")[:48]
+            if len(r.get("raw_metric_labels") or "") > 48:
+                raw += "..."
+            metric_cell = (
+                '<div><strong>'
+                + _esc_with_breaks(r.get("metric_column"))
+                + '</strong> ' + main + '</div>'
+                '<div style="font-size:11px;color:' + COLORS["text_muted"]
+                + ';margin-top:3px;">' + _esc(raw) + '</div>'
+            )
+            # Combine Extra rows + Max repeats into one cell (big number, small
+            # subtitle), same trick for Conflicts + Max spread.
+            extra_cell = (
+                '<div><strong>' + _fmt_int(r.get("extra_row_count")) + '</strong></div>'
+                '<div style="font-size:11px;color:' + COLORS["text_muted"]
+                + ';margin-top:3px;">max rep '
+                + _fmt_int(r.get("max_occurrences_per_ser_cid")) + '</div>'
+            )
+            conflict_cell = (
+                '<div><strong>' + _fmt_int(r.get("conflicting_ser_cid_count"))
+                + '</strong></div>'
+                '<div style="font-size:11px;color:' + COLORS["text_muted"]
+                + ';margin-top:3px;">spread ' + spread_str + '</div>'
+            )
             rows.append([
                 '<strong>' + _esc_with_breaks(r.get("source_file_name")) + '</strong>',
-                _esc_with_breaks(r.get("metric_column")) + ' ' + main,
-                _esc((r.get("raw_metric_labels") or "")[:60]),
+                metric_cell,
                 _fmt_int(r.get("duplicate_ser_cid_count")),
-                _fmt_int(r.get("extra_row_count")),
-                _fmt_int(r.get("max_occurrences_per_ser_cid")),
-                _fmt_int(r.get("conflicting_ser_cid_count")),
-                spread_str,
+                extra_cell,
+                conflict_cell,
             ])
         sections.append(_data_table(
-            headers=["File", "Metric column", "Raw label",
-                     "Dup ser_cids", "Extra rows", "Max repeats",
-                     "Conflicts", "Max spread"],
+            headers=["File", "Metric", "Dup ser_cids", "Extra rows", "Conflicts"],
             rows=rows,
-            col_aligns=["left", "left", "left", "right", "right", "right", "right", "right"],
-            col_widths=[22, 14, 16, 10, 9, 10, 9, 10],
+            col_aligns=["left", "left", "right", "right", "right"],
+            col_widths=[26, 32, 13, 14, 15],
             caption="Top 10 by extra row count. Source: `%s.%s.%s`"
                     % (bq_project, bq_dataset, bq_tables["dup_detail"])))
 
